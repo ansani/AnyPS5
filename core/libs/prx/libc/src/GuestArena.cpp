@@ -398,6 +398,46 @@ void GuestArenaReset_nid_postfix(void* pointer, std::size_t bytes) {
     if (!Arena::Get().Contains(pointer, bytes)) throw OutsideArena("reset", pointer, bytes);
     if (PlaceAt(pointer, bytes, 0x01) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "guest arena reset failed");
 }
+#elif defined(__APPLE__)
+int PosixProtection(std::uint32_t windowsProtection) {
+    switch (windowsProtection) {
+    case 0x01: return PROT_NONE;
+    case 0x02: return PROT_READ;
+    case 0x04: return PROT_READ | PROT_WRITE;
+    case 0x08: return PROT_READ | PROT_WRITE;
+    case 0x10: return PROT_EXEC;
+    case 0x20: return PROT_READ | PROT_EXEC;
+    case 0x40: return PROT_READ | PROT_WRITE | PROT_EXEC;
+    default: throw std::runtime_error("guest arena: unmapped protection value");
+    }
+}
+
+void* PlaceAt(void* pointer, std::size_t bytes, std::uint32_t protection) {
+    return mmap(pointer, bytes, PosixProtection(protection), MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+}
+
+void GuestArenaSetProtection_nid_postfix(std::uintptr_t address, std::size_t bytes, std::uint32_t protection) {
+    if (!Arena::Get().Contains(reinterpret_cast<void*>(address), bytes)) throw OutsideArena("set protection", reinterpret_cast<void*>(address), bytes);
+    if (mprotect(reinterpret_cast<void*>(address), bytes, PosixProtection(protection)) != 0)
+        throw std::system_error(errno, std::generic_category(), "guest arena protection failed");
+}
+
+void GuestArenaCommit_nid_postfix(void* pointer, std::size_t bytes, std::uint32_t protection, std::size_t granule) {
+    (void)granule;
+    if (!Arena::Get().Contains(pointer, bytes)) throw OutsideArena("commit", pointer, bytes);
+    const bool marked = Arena::Get().MarkUsedForCommit(pointer, bytes);
+    try {
+        if (PlaceAt(pointer, bytes, protection) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "guest arena commit failed");
+    } catch (...) {
+        if (marked) Arena::Get().Release(pointer, bytes);
+        throw;
+    }
+}
+
+void GuestArenaReset_nid_postfix(void* pointer, std::size_t bytes) {
+    if (!Arena::Get().Contains(pointer, bytes)) throw OutsideArena("reset", pointer, bytes);
+    if (PlaceAt(pointer, bytes, 0x01) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "guest arena reset failed");
+}
 #endif
 
 bool GuestArenaWriteWatched_nid_postfix() {

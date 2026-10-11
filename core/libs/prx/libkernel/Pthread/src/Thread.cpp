@@ -87,6 +87,14 @@ static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
     GetCurrentThreadStackLimits(&lowLimit, &highLimit);
     *low = lowLimit;
     *high = highLimit;
+#elif defined(__APPLE__)
+    // macOS doesn't have pthread_getattr_np. Use pthread_get_stackaddr_np and pthread_get_stacksize_np.
+    void* address = pthread_get_stackaddr_np(pthread_self());
+    std::size_t size = pthread_get_stacksize_np(pthread_self());
+    if (address == nullptr || size == 0)
+        return false;
+    *low = reinterpret_cast<std::uintptr_t>(address) - size;
+    *high = reinterpret_cast<std::uintptr_t>(address);
 #else
     pthread_attr_t attr;
     if (pthread_getattr_np(pthread_self(), &attr) != 0)
@@ -215,6 +223,10 @@ PthreadPrivate::~PthreadPrivate() {
 static void BindHostCpuClock(PthreadPrivate* self) {
 #ifdef _WIN32
     (void)self;
+#elif defined(__APPLE__)
+    // macOS doesn't have pthread_getcpuclockid. Use CLOCK_THREAD_CPUTIME_ID directly.
+    self->hostCpuClock = CLOCK_THREAD_CPUTIME_ID;
+    self->hostCpuClockBound = true;
 #else
     clockid_t clock{};
     const int error = pthread_getcpuclockid(pthread_self(), &clock);

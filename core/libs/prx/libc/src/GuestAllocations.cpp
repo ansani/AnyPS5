@@ -23,7 +23,15 @@
 #include <sstream>
 #include <system_error>
 #include <vector>
+#if defined(__linux__)
 #include <link.h>
+#endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+extern "C" int dl_iterate_phdr(int (*callback)(dl_phdr_info*, std::size_t, void*), void* data);
+#endif
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -75,6 +83,7 @@ void recordChange(void* mutation, const void* pointer, std::size_t bytes) {
 }
 
 #ifndef _WIN32
+#if defined(__linux__)
 std::vector<std::pair<std::uintptr_t, std::size_t>> fileBackedWritableImage() {
     const auto image = std::filesystem::read_symlink("/proc/self/exe").string();
     std::ifstream maps("/proc/self/maps");
@@ -104,6 +113,7 @@ bool backWritableImageAnonymously() {
 }
 
 [[maybe_unused]] const bool writableImageAnonymous = backWritableImageAnonymously();
+#endif
 #endif
 
 }
@@ -230,6 +240,7 @@ void GuestAllocationsUnregisterImage_nid_postfix(void* mutation, const void* ima
     state.registeredImages.erase(found);
 }
 #else
+#if defined(__linux__)
 void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
     auto& state = registry();
     if (state.mainImageRegistered) return;
@@ -274,6 +285,57 @@ void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
     state.ranges.swap(replacement);
     state.mainImageRegistered = true;
 }
+#elif defined(__APPLE__)
+// ELF constants for the program headers stored in __APS5DATA section
+constexpr std::uint32_t PT_LOAD = 1;
+constexpr std::uint32_t PF_R = 0x4;
+constexpr std::uint32_t PF_W = 0x2;
+
+void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
+    auto& state = registry();
+    if (state.mainImageRegistered) return;
+    struct Page {
+        bool readable = false;
+        bool writable = false;
+    };
+    std::map<std::uint64_t, Page> pages;
+    const auto pageSize = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
+    std::pair<std::map<std::uint64_t, Page>*, std::uint64_t> collection{&pages, pageSize};
+    dl_iterate_phdr([](dl_phdr_info* image, std::size_t, void* data) {
+        auto& collected = *static_cast<std::pair<std::map<std::uint64_t, Page>*, std::uint64_t>*>(data);
+        for (int index = 0; index < image->dlpi_phnum; ++index) {
+            const auto& header = image->dlpi_phdr[index];
+            if (header.p_type != PT_LOAD || header.p_memsz == 0) continue;
+            const auto start = (image->dlpi_addr + header.p_vaddr) & ~(collected.second - 1);
+            const auto end = (image->dlpi_addr + header.p_vaddr + header.p_memsz + collected.second - 1) & ~(collected.second - 1);
+            for (auto page = start; page < end; page += collected.second) {
+                auto& entry = (*collected.first)[page];
+                entry.readable = entry.readable || (header.p_flags & (PF_R | PF_W)) != 0;
+                entry.writable = entry.writable || (header.p_flags & PF_W) != 0;
+            }
+        }
+        return 1;
+    }, &collection);
+    require(!pages.empty(), "main guest image has no loadable segments");
+    auto replacement = state.ranges;
+    for (auto page = pages.begin(); page != pages.end();) {
+        auto last = page;
+        while (std::next(last) != pages.end() && std::next(last)->first == last->first + pageSize && std::next(last)->second.readable == page->second.readable && std::next(last)->second.writable == page->second.writable) ++last;
+        const auto address = page->first;
+        const auto bytes = static_cast<std::size_t>(last->first + pageSize - address);
+        const auto next = replacement.lower_bound(address);
+        require(next == replacement.end() || address + bytes <= next->first, "guest image overlaps a registered allocation");
+        if (next != replacement.begin()) {
+            const auto& previous = *std::prev(next)->second;
+            require(previous.address + previous.bytes <= address, "guest image overlaps a registered allocation");
+        }
+        replacement.emplace(address, std::make_shared<const Range>(Range{address, bytes, page->second.readable, page->second.writable, address, bytes, false}));
+        page = std::next(last);
+    }
+    state.ranges.swap(replacement);
+    state.mainImageRegistered = true;
+}
+#endif
 #endif
 
 void GuestAllocationsAdd_nid_postfix(void* mutation, void* pointer, std::size_t bytes, bool readable, bool writable, bool gpu) {
@@ -420,6 +482,8 @@ std::map<std::uint64_t, std::shared_ptr<const Range>> replaceRange(const void* p
     require(bytes != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address, "invalid guest protection or unmap range");
     require(!writable || readable, "writable guest allocation must be readable");
     const auto end = address + bytes;
+    const auto addr64 = static_cast<std::uint64_t>(address);
+    const auto end64 = static_cast<std::uint64_t>(end);
     auto replacement = registry().ranges;
     auto cursor = address;
     for (const auto& [base, entry] : registry().ranges) {
@@ -432,10 +496,10 @@ std::map<std::uint64_t, std::shared_ptr<const Range>> replaceRange(const void* p
         const auto insert = [&](std::uint64_t first, std::uint64_t last, bool canRead, bool canWrite, bool gpuMapped) {
             if (first < last) replacement.emplace(first, std::make_shared<const Range>(Range{first, static_cast<std::size_t>(last - first), canRead, canWrite, range.allocationAddress, range.allocationBytes, range.releasable, gpuMapped}));
         };
-        insert(base, std::max(base, address), range.readable, range.writable, range.gpu);
-        if (!remove) insert(std::max(base, address), std::min(finish, end), readable, writable, gpu);
-        insert(std::min(finish, end), finish, range.readable, range.writable, range.gpu);
-        cursor = std::min(finish, end);
+        insert(base, std::max(base, addr64), range.readable, range.writable, range.gpu);
+        if (!remove) insert(std::max(base, addr64), std::min(finish, end64), readable, writable, gpu);
+        insert(std::min(finish, end64), finish, range.readable, range.writable, range.gpu);
+        cursor = std::min(finish, end64);
     }
     require(cursor == end, "guest protection or unmap range is not registered");
     return replacement;

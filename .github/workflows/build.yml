@@ -298,3 +298,47 @@ jobs:
           [ -f ctest.log ] || exit 0
           awk '/Test +#[0-9]+: / && $NF == "sec" { for (i = 1; i <= NF; i++) if ($i ~ /^#[0-9]+:$/) name = $(i + 1); t = $(NF - 1) + 0; if (t > max[name]) max[name] = t }
             END { for (name in max) if (max[name] > 30) printf "::warning title=Slow test::%s took %.1f s on %s; tests must finish in 30 s (CONTRIBUTING.md)\n", name, max[name], ENVIRON["RUNNER_OS"] }' ctest.log
+
+  macos:
+    needs: eligibility
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.eligibility.outputs.full == 'true' }}
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.eligibility.outputs.sha }}
+          persist-credentials: false
+          submodules: true
+      - name: Merge the pull request into main
+        if: ${{ needs.eligibility.outputs.head != '' }}
+        shell: bash
+        env:
+          PR_NUMBER: ${{ needs.eligibility.outputs.pr }}
+          PR_HEAD: ${{ needs.eligibility.outputs.head }}
+        run: |
+          git fetch --no-tags --unshallow origin "refs/pull/$PR_NUMBER/head"
+          if [ "$(git rev-parse FETCH_HEAD)" != "$PR_HEAD" ]; then echo "::error::The pull request has newer commits; start a new build"; exit 1; fi
+          if ! git -c user.name=ci -c user.email=ci@localhost merge --no-ff --no-edit FETCH_HEAD; then echo "::error::The pull request does not merge cleanly into main; rebase it first"; exit 1; fi
+          git submodule update --init --recursive
+      - uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: macos
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          evict-old-files: job
+      - run: cmake -S . -B build $CONFIGURE -DANYPS5_ENABLE_SPIRV_TOOLS=ON
+      - name: Check that every test executable is registered with ctest
+        run: python3 tools/check_test_registration.py build
+      - run: cmake --build build
+      - run: cmake --build build --target libs
+      - run: ctest --test-dir build --output-on-failure --timeout 120 --parallel 4 --output-log ctest.log --output-junit ctest.xml
+        env:
+          ANYPS5_REQUIRE_VULKAN: 1
+      - run: python3 tools/check_skips.py build/ctest.xml --job macos
+      - name: Report tests slower than 30 s
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          [ -f ctest.log ] || exit 0
+          awk '/Test +#[0-9]+: / && $NF == "sec" { for (i = 1; i <= NF; i++) if ($i ~ /^#[0-9]+:$/) name = $(i + 1); t = $(NF - 1) + 0; if (t > max[name]) max[name] = t }
+            END { for (name in max) if (max[name] > 30) printf "::warning title=Slow test::%s took %.1f s on %s; tests must finish in 30 s (CONTRIBUTING.md)\n", name, max[name], ENVIRON["RUNNER_OS"] }' ctest.log

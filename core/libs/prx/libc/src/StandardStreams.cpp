@@ -36,8 +36,10 @@ std::int32_t APS5_VABI ungetwc_nid_postfix(std::int32_t value, FileStream* strea
 }
 int APS5_VABI getc_nid_postfix(FileStream* stream) { return fgetc_nid_postfix(stream); }
 int APS5_VABI getc_unlocked_nid_postfix(FileStream* stream) {
-#ifdef _WIN32
+#if defined(_WIN32)
     const int result = _fgetc_nolock(GetNativeStream(stream));
+#elif defined(__APPLE__)
+    const int result = std::getc(GetNativeStream(stream));
 #else
     const int result = ::getc_unlocked(GetNativeStream(stream));
 #endif
@@ -53,8 +55,10 @@ int APS5_VABI fputc_nid_postfix(int value, FileStream* stream) {
 }
 int APS5_VABI putc_nid_postfix(int value, FileStream* stream) { return fputc_nid_postfix(value, stream); }
 int APS5_VABI putc_unlocked_nid_postfix(int value, FileStream* stream) {
-#ifdef _WIN32
+#if defined(_WIN32)
     const int result = _fputc_nolock(value, GetNativeStream(stream));
+#elif defined(__APPLE__)
+    const int result = std::putc(value, GetNativeStream(stream));
 #else
     const int result = ::putc_unlocked(value, GetNativeStream(stream));
 #endif

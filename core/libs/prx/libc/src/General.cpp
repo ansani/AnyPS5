@@ -138,6 +138,17 @@ WriteMark Now() {
 bool NotBefore(const WriteMark& time, const WriteMark& mark) {
     return CompareFileTime(&time, &mark) >= 0;
 }
+#elif defined(__APPLE__)
+using WriteMark = timespec;
+WriteMark Now() {
+    timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    return now;
+}
+bool NotBefore(const WriteMark& time, const WriteMark& mark) {
+    if (time.tv_sec == mark.tv_sec) return time.tv_nsec >= mark.tv_nsec;
+    return time.tv_sec >= mark.tv_sec;
+}
 #else
 using WriteMark = timespec;
 WriteMark Now() {
@@ -181,7 +192,13 @@ void FlushPath(const std::filesystem::path& path) {
 #else
 std::optional<WriteMark> WriteTime(const std::filesystem::path& path) {
     struct stat data;
-    if (::stat(path.c_str(), &data) == 0) return data.st_mtim;
+    if (::stat(path.c_str(), &data) == 0) {
+#if defined(__APPLE__)
+        return data.st_mtimespec;
+#else
+        return data.st_mtim;
+#endif
+    }
     if (errno == ENOENT || errno == ENOTDIR) return std::nullopt;
     throw std::system_error(errno, std::generic_category(), "Reading the write time of " + path.string());
 }
